@@ -8,6 +8,36 @@ library(plotly)
 library(dplyr)
 library(tidyr)
 
+# Diagnostic function to check data format
+check_conjoint_data <- function(data, choice_var, resp_var, alt_var) {
+  cat("=== CONJOINT DATA DIAGNOSTICS ===\n")
+  cat("Data dimensions:", nrow(data), "rows x", ncol(data), "cols\n")
+  cat("Choice variable:", choice_var, "- Type:", class(data[[choice_var]]), "\n")
+  cat("Choice values:", unique(data[[choice_var]]), "\n")
+  cat("Respondents:", length(unique(data[[resp_var]])), "\n")
+  cat("Alternatives per task:", length(unique(data[[alt_var]])), "\n")
+  
+  # Check for missing values
+  missing_choice <- sum(is.na(data[[choice_var]]))
+  if (missing_choice > 0) {
+    cat("WARNING:", missing_choice, "missing values in choice variable\n")
+  }
+  
+  # Check choice pattern
+  choice_sum_per_task <- data %>%
+    group_by(!!sym(resp_var), task_id) %>%
+    summarise(total_choices = sum(!!sym(choice_var), na.rm = TRUE), .groups = 'drop')
+  
+  invalid_tasks <- sum(choice_sum_per_task$total_choices != 1)
+  if (invalid_tasks > 0) {
+    cat("WARNING:", invalid_tasks, "tasks don't have exactly one choice\n")
+  } else {
+    cat("✓ All tasks have exactly one choice\n")
+  }
+  
+  cat("=== DIAGNOSTICS COMPLETE ===\n\n")
+}
+
 # Generate sample choice-based conjoint data
 generate_sample_conjoint_data <- function(
   n_respondents = 200, 
@@ -46,7 +76,8 @@ generate_sample_conjoint_data <- function(
         brand = sample(brands, n_alternatives, replace = TRUE),
         color = sample(colors, n_alternatives, replace = TRUE),
         size = sample(sizes, n_alternatives, replace = TRUE),
-        price = sample(prices, n_alternatives, replace = TRUE)
+        price = sample(prices, n_alternatives, replace = TRUE),
+        stringsAsFactors = FALSE
       )
       
       # Calculate utilities for each alternative
@@ -85,19 +116,48 @@ rgumbel <- function(n, location = 0, scale = 1) {
 # Run choice-based conjoint analysis
 run_conjoint_analysis <- function(data, choice_var, resp_var, alt_var, attributes) {
   
+  # Input validation
+  if (!choice_var %in% names(data)) stop("Choice variable not found in data")
+  if (!resp_var %in% names(data)) stop("Respondent variable not found in data")
+  if (!alt_var %in% names(data)) stop("Alternative variable not found in data")
+  
+  # Run diagnostics
+  cat("Running data diagnostics...\n")
+  check_conjoint_data(data, choice_var, resp_var, alt_var)
+  
   # Prepare data for mlogit
-  # Create individual index
+  # Ensure choice variable is logical (convert 0/1 to FALSE/TRUE)
+  if (is.numeric(data[[choice_var]])) {
+    data[[choice_var]] <- as.logical(data[[choice_var]])
+  }
+  
+  # Create individual index and choice situation
   data$individual <- data[[resp_var]]
-  data$choice_situation <- paste(data[[resp_var]], 
-                                seq_along(data[[resp_var]]) %/% 
-                                length(unique(data[[alt_var]])), sep = "_")
+  
+  # Create unique choice situation identifier
+  if ("task_id" %in% names(data)) {
+    data$choice_situation <- paste(data[[resp_var]], data[["task_id"]], sep = "_")
+  } else {
+    # If no task_id, create one based on row groups
+    data$choice_situation <- paste(data[[resp_var]], 
+                                  rep(1:(nrow(data)/length(unique(data[[alt_var]]))), 
+                                      each = length(unique(data[[alt_var]]))), sep = "_")
+  }
   
   # Convert to dfidx format
-  mlogit_data <- dfidx(data, 
-                       choice = choice_var, 
-                       idx = list(c("choice_situation", "individual"), alt_var),
-                       drop.unused.levels = TRUE,
-                       levels = unique(data[[alt_var]]))
+  cat("Converting data to dfidx format...\n")
+  tryCatch({
+    mlogit_data <- dfidx(data, 
+                         choice = choice_var, 
+                         idx = list(c("choice_situation", "individual"), alt_var),
+                         drop.unused.levels = TRUE)
+    cat("✓ Data conversion successful\n")
+  }, error = function(e) {
+    cat("Error in dfidx conversion:", e$message, "\n")
+    cat("Data structure:\n")
+    str(data[c(choice_var, "choice_situation", "individual", alt_var)])
+    stop("Failed to convert data for mlogit analysis")
+  })
   
   # Create formula
   formula_parts <- c()
